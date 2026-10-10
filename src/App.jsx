@@ -14,7 +14,7 @@ export default function App() {
   const [alertLogs, setAlertLogs] = useState([]);
   const timerRef = useRef(null);
 
-  // Audio Siren Synthesizer (No external MP3 file required)
+  // Audio Siren Synthesizer
   const playSirenAlarm = () => {
     try {
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -61,8 +61,28 @@ export default function App() {
     }
   };
 
+  // Fetch past SQL logs on initial load
+  useEffect(() => {
+    fetch('http://localhost:5000/api/alerts')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && data.logs) {
+          setAlertLogs(data.logs);
+        }
+      })
+      .catch((err) => console.log('Backend offline or initializing...'));
+
+    // Listen for live SOS broadcasts from server
+    socket.on('owner_alert', (newAlert) => {
+      setAlertLogs((prev) => [newAlert, ...prev]);
+      playSirenAlarm();
+    });
+
+    return () => socket.off('owner_alert');
+  }, []);
+
   // Trigger Emergency, Play Siren, Broadcast via WebSockets
-  const triggerEmergencyAlert = (type = 'MANUAL_SOS') => {
+  const triggerEmergencyAlert = async (type = 'MANUAL_SOS') => {
     setStatus('CRITICAL');
     setTimerActive(false);
     updateLocation();
@@ -70,15 +90,29 @@ export default function App() {
 
     const currentLoc = location || { lat: 9.146984, lng: 77.832288 };
     const sosPayload = {
-      id: Date.now(),
       workerId: 'WORKER-8042',
       type: type,
       timestamp: new Date().toLocaleTimeString(),
       location: currentLoc
     };
 
-    // Emit live WebSocket event across internet to all owners
+    // 1. Emit live WebSocket event across internet to all owners
     socket.emit('worker_sos', sosPayload);
+
+    // 2. Also send to HTTP POST to trigger backend rate-limit checks
+    try {
+      const res = await fetch('http://localhost:5000/api/send-sos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sosPayload)
+      });
+      const data = await res.json();
+      if (res.status === 429) {
+        alert('🚨 Rate Limit Exceeded: Too many SOS requests in short time!');
+      }
+    } catch (e) {
+      console.error(e);
+    }
 
     if (navigator.vibrate) navigator.vibrate([500, 200, 500, 200, 500]);
   };
@@ -88,16 +122,6 @@ export default function App() {
     setTimerActive(false);
     setCheckInTime(30);
   };
-
-  // Listen for real-time SOS broadcasts from server
-  useEffect(() => {
-    socket.on('owner_alert', (newAlert) => {
-      setAlertLogs((prev) => [newAlert, ...prev]);
-      playSirenAlarm(); // Play alert chime on owner device as well
-    });
-
-    return () => socket.off('owner_alert');
-  }, []);
 
   useEffect(() => {
     if (timerActive && checkInTime > 0) {
@@ -193,9 +217,11 @@ export default function App() {
                   <h4 style={{ margin: '0 0 5px 0', color: '#f43f5e' }}>🚨 EMERGENCY: {log.type}</h4>
                   <p style={{ margin: '2px 0' }}><strong>Worker:</strong> {log.workerId}</p>
                   <p style={{ margin: '2px 0' }}><strong>Time:</strong> {log.timestamp}</p>
-                  <p style={{ margin: '2px 0', color: '#38bdf8' }}><strong>Location:</strong> {log.location.lat}, {log.location.lng}</p>
+                  <p style={{ margin: '2px 0', color: '#38bdf8' }}>
+                    <strong>Location:</strong> {log.location?.lat}, {log.location?.lng}
+                  </p>
                   <a
-                    href={`https://www.google.com/maps?q=${log.location.lat},${log.location.lng}`}
+                    href={`https://www.google.com/maps?q=${log.location?.lat},${log.location?.lng}`}
                     target="_blank"
                     rel="noreferrer"
                     className="btn"
